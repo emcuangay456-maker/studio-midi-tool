@@ -252,7 +252,7 @@ class StudioApp:
                         self._queue("log", f"[WARN] Demucs error: {demucs_exc}")
                         stem_file = self.prepare_input_as_stem(audio_path, base_out / "stems", stem_type)
                         self._queue("log", f"[OK] Stem fallback file (auto): {stem_file}")
-                stem_file = self.ensure_wav_stem(stem_file)
+                stem_file = self.ensure_wav_stem(stem_file, base_out / "stems")
 
                 self._queue("status", f"Đang convert MIDI bằng {midi_engine}...")
                 midi_file = self.run_midi_transcription(stem_file, base_out / "midi", midi_engine)
@@ -283,13 +283,13 @@ class StudioApp:
             raise RuntimeError("demucs chạy xong nhưng không tìm thấy file stem output (wav/mp3).")
         return found
 
-    def ensure_wav_stem(self, stem_file: Path) -> Path:
+    def ensure_wav_stem(self, stem_file: Path, stems_root: Path) -> Path:
         if stem_file.suffix.lower() == ".wav":
             return stem_file
         wav_path = stem_file.with_suffix(".wav")
         args = ["ffmpeg", "-y", "-i", str(stem_file), str(wav_path)]
         self._queue("log", "[INFO] Convert stem sang WAV bằng ffmpeg...")
-        self._stream_process(args, cwd=wav_path.parent)
+        self._stream_process(args, cwd=stems_root)
         if not wav_path.exists():
             raise RuntimeError("Convert stem sang WAV thất bại.")
         return wav_path
