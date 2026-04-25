@@ -255,6 +255,8 @@ class StudioApp:
                         stem_file = self.prepare_input_as_stem(audio_path, base_out / "stems", stem_type)
                         self._queue("log", f"[OK] Stem fallback file (auto): {stem_file}")
                 stem_file = self.ensure_wav_stem(stem_file, base_out / "stems")
+                # Bước mới: harmonic separation trước khi MIDI
+                stem_file = self.extract_melody_only(stem_file, base_out / "stems")
 
                 detected_bpm = self.detect_bpm_from_audio(stem_file)
                 self._queue("log", f"[INFO] BPM sẽ dùng để quantize: {detected_bpm:.1f}")
@@ -262,6 +264,8 @@ class StudioApp:
                 midi_file = self.run_midi_transcription(
                     stem_file, base_out / "midi", midi_engine, bpm=detected_bpm
                 )
+                # Bước mới: ghi BPM chuẩn vào header
+                midi_file = self.write_bpm_to_midi(midi_file, detected_bpm)
                 info = self.inspect_midi(midi_file)
                 self._queue("result", self._render_result(midi_file, info))
                 self._queue("status", f"Hoàn tất! MIDI: {midi_file}")
@@ -513,6 +517,39 @@ class StudioApp:
         except Exception as exc:
             self._queue("log", f"[WARN] librosa BPM fail, dùng 120: {exc}")
             return 120.0
+
+    def extract_melody_only(self, wav_path: Path, output_root: Path) -> Path:
+        try:
+            import librosa
+            import soundfile as sf
+
+            self._queue("log", "[INFO] Harmonic separation - loại percussion giữ melody...")
+            y, sr = librosa.load(str(wav_path), sr=22050, mono=True)
+            y_harmonic = librosa.effects.harmonic(y, margin=4)
+            melody_path = output_root / (wav_path.stem + "_melody.wav")
+            sf.write(str(melody_path), y_harmonic, sr)
+            self._queue("log", f"[OK] Melody extracted: {melody_path.name}")
+            return melody_path
+        except Exception as exc:
+            self._queue("log", f"[WARN] Harmonic separation fail, dùng file gốc: {exc}")
+            return wav_path
+
+    def write_bpm_to_midi(self, midi_path: Path, bpm: float) -> Path:
+        try:
+            import mido
+
+            mid = mido.MidiFile(str(midi_path))
+            tempo_us = mido.bpm2tempo(bpm)
+            tempo_msg = mido.MetaMessage("set_tempo", tempo=tempo_us, time=0)
+            if mid.tracks:
+                mid.tracks[0].insert(0, tempo_msg)
+            out_path = midi_path.with_name(midi_path.stem + "_final.mid")
+            mid.save(str(out_path))
+            self._queue("log", f"[OK] BPM {bpm:.1f} đã ghi vào MIDI header: {out_path.name}")
+            return out_path
+        except Exception as exc:
+            self._queue("log", f"[WARN] write BPM fail, giữ file cũ: {exc}")
+            return midi_path
 
     def estimate_bpm(self, pm) -> float:
         try:
