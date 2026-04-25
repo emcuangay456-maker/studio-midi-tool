@@ -74,7 +74,8 @@ class StudioApp:
         except Exception:
             pass
 
-        self.root.option_add("*Font", "Segoe UI 10")
+        # Use Tcl-safe font format for family names containing spaces.
+        self.root.option_add("*Font", "{Segoe UI} 10")
         self.style.configure("TLabel", font=("Segoe UI", 10))
         self.style.configure("TButton", font=("Segoe UI", 10), padding=6)
         self.style.configure("TEntry", font=("Segoe UI", 10))
@@ -114,17 +115,7 @@ class StudioApp:
             row=1, column=1, sticky="ew"
         )
 
-        ttk.Label(input_group, text="Stem type:").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        stem_combo = ttk.Combobox(
-            input_group,
-            textvariable=self.stem_type_var,
-            values=STEM_TYPES,
-            state="readonly",
-            width=16,
-        )
-        stem_combo.grid(row=3, column=0, sticky="w")
-
-        ttk.Label(input_group, text="MIDI engine:").grid(row=2, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(input_group, text="MIDI engine:").grid(row=2, column=0, sticky="w", pady=(10, 0))
         engine_combo = ttk.Combobox(
             input_group,
             textvariable=self.midi_engine_var,
@@ -132,12 +123,12 @@ class StudioApp:
             state="readonly",
             width=34,
         )
-        engine_combo.grid(row=3, column=1, sticky="w")
+        engine_combo.grid(row=3, column=0, sticky="w")
 
         ttk.Label(input_group, text="BPM (để trống = tự detect):").grid(
-            row=2, column=2, sticky="w", pady=(10, 0)
+            row=2, column=1, sticky="w", pady=(10, 0)
         )
-        ttk.Entry(input_group, textvariable=self.bpm_var, width=10).grid(row=3, column=2, sticky="w")
+        ttk.Entry(input_group, textvariable=self.bpm_var, width=10).grid(row=3, column=1, sticky="w")
 
         ttk.Label(input_group, text="Output folder (optional):").grid(
             row=4, column=0, sticky="w", pady=(10, 0)
@@ -150,26 +141,50 @@ class StudioApp:
         )
         input_group.columnconfigure(0, weight=1)
 
+        # RipX section
+        ripx_group = ttk.LabelFrame(main, text="RipX Integration (optional)", padding=10)
+        ripx_group.pack(fill="x", pady=(12, 0))
+
+        ttk.Label(ripx_group, text="RipX exe path:").grid(row=0, column=0, sticky="w")
+        self.ripx_path_var = StringVar(value="")
+        ttk.Entry(ripx_group, textvariable=self.ripx_path_var, width=70).grid(
+            row=1, column=0, padx=(0, 8), sticky="ew"
+        )
+        ttk.Button(ripx_group, text="Browse", command=self.browse_ripx).grid(
+            row=1, column=1, sticky="ew"
+        )
+        self.open_ripx_btn = ttk.Button(
+            ripx_group, text="Open in RipX", command=self.open_in_ripx
+        )
+        self.open_ripx_btn.grid(row=1, column=2, padx=(8, 0), sticky="ew")
+
+        ttk.Label(
+            ripx_group,
+            text="Workflow: Chọn audio -> Open in RipX -> Chỉnh MIDI -> Export -> Import MIDI from RipX",
+            foreground="#888888",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        self.import_midi_btn = ttk.Button(
+            ripx_group, text="Import MIDI from RipX output", command=self.import_midi_from_ripx
+        )
+        self.import_midi_btn.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        ripx_group.columnconfigure(0, weight=1)
+
         # Actions
         action_group = ttk.LabelFrame(main, text="2) Actions", padding=10)
         action_group.pack(fill="x", pady=(12, 0))
-        self.separate_btn = ttk.Button(
-            action_group, text="Tách Stem", command=self.run_separation_only
-        )
-        self.separate_btn.grid(row=0, column=0, padx=(0, 8), sticky="ew")
         self.midi_btn = ttk.Button(
             action_group, text="Get MIDI (từ stem đã có)", command=self.run_midi_only
         )
-        self.midi_btn.grid(row=0, column=1, padx=(0, 8), sticky="ew")
-        self.all_btn = ttk.Button(action_group, text="Run Full Pipeline", command=self.run_all)
-        self.all_btn.grid(row=0, column=2, padx=(0, 8), sticky="ew")
+        self.midi_btn.grid(row=0, column=0, padx=(0, 8), sticky="ew")
         self.open_btn = ttk.Button(
             action_group, text="Mở output folder", command=self.open_output_folder
         )
-        self.open_btn.grid(row=0, column=3, padx=(0, 8), sticky="ew")
+        self.open_btn.grid(row=0, column=1, padx=(0, 8), sticky="ew")
         self.copy_btn = ttk.Button(action_group, text="Copy MIDI path", command=self.copy_midi_path)
-        self.copy_btn.grid(row=0, column=4, sticky="ew")
-        for i in range(5):
+        self.copy_btn.grid(row=0, column=2, sticky="ew")
+        for i in range(3):
             action_group.columnconfigure(i, weight=1)
 
         # Result
@@ -206,14 +221,72 @@ class StudioApp:
         if path:
             self.output_dir_var.set(path)
 
+    def browse_ripx(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Chọn RipX executable",
+            filetypes=[("Executable", "*.exe"), ("All files", "*.*")],
+        )
+        if path:
+            self.ripx_path_var.set(path)
+
+    def open_in_ripx(self) -> None:
+        audio_path = self.audio_path_var.get().strip()
+        ripx_exe = self.ripx_path_var.get().strip()
+
+        if not audio_path:
+            messagebox.showerror("Thiếu file", "Vui lòng chọn file audio trước.")
+            return
+        if not ripx_exe or not Path(ripx_exe).exists():
+            messagebox.showerror(
+                "Thiếu RipX",
+                "Vui lòng chọn đường dẫn RipX exe.\n"
+                "Thường ở: C:\\Program Files\\RipX DeepAudio\\RipX.exe",
+            )
+            return
+        try:
+            subprocess.Popen([ripx_exe, audio_path])
+            self._append_log(f"[INFO] Đã mở RipX với file: {Path(audio_path).name}")
+            self.status_var.set("RipX đang mở — chỉnh MIDI xong nhớ Export ra folder output.")
+        except Exception as exc:
+            messagebox.showerror("Lỗi mở RipX", str(exc))
+
+    def import_midi_from_ripx(self) -> None:
+        """Scan output folder tìm MIDI mới nhất từ RipX, apply BPM + rename."""
+        midi_file = filedialog.askopenfilename(
+            title="Chọn file MIDI export từ RipX",
+            filetypes=[("MIDI files", "*.mid *.midi"), ("All files", "*.*")],
+        )
+        if not midi_file:
+            return
+        midi_path = Path(midi_file)
+
+        manual_bpm = self.bpm_var.get().strip()
+        if manual_bpm:
+            try:
+                bpm = max(40.0, min(240.0, float(manual_bpm)))
+            except ValueError:
+                bpm = 120.0
+        else:
+            bpm_input = simpledialog.askfloat(
+                "BPM",
+                "Nhập BPM cho file MIDI này:",
+                initialvalue=120.0,
+                minvalue=40,
+                maxvalue=240,
+            )
+            bpm = bpm_input if bpm_input else 120.0
+
+        final_path = self.write_bpm_to_midi(midi_path, bpm)
+        self.midi_path_var.set(str(final_path))
+        self.result_text.config(text=f"OK MIDI từ RipX: {final_path.name} | BPM: {bpm:.1f}")
+        self._append_log(f"[OK] Import MIDI từ RipX: {final_path.name} (BPM={bpm:.1f})")
+        self.status_var.set(f"Import xong: {final_path.name}")
+
     def run_separation_only(self) -> None:
         self._start_worker(pipeline="separate")
 
     def run_midi_only(self) -> None:
         self._start_worker(pipeline="midi")
-
-    def run_all(self) -> None:
-        self._start_worker(pipeline="all")
 
     def _start_worker(self, pipeline: str) -> None:
         if self.worker_running:
@@ -301,12 +374,12 @@ class StudioApp:
                 )
                 # Bước mới: ghi BPM chuẩn vào header
                 midi_file = self.write_bpm_to_midi(midi_file, detected_bpm)
-                # Dọn file WAV trung gian, chỉ giữ MIDI
+                # Dọn toàn bộ stems trung gian, chỉ giữ MIDI output.
                 try:
                     stems_dir = base_out / "stems"
-                    for f in stems_dir.glob("*.wav"):
-                        f.unlink()
-                    self._queue("log", "[INFO] Đã xóa file WAV trung gian.")
+                    if stems_dir.exists():
+                        shutil.rmtree(stems_dir, ignore_errors=True)
+                    self._queue("log", "[INFO] Đã xóa thư mục stems trung gian.")
                 except Exception:
                     pass
                 info = self.inspect_midi(midi_file)
@@ -508,7 +581,7 @@ class StudioApp:
 
         midi_file = midi_files[0]
         self._queue("log", f"[INFO] basic_pitch MIDI: {midi_file.name}")
-        return self.post_process_midi(midi_file, bpm=bpm)
+        return self.post_process_midi(midi_file, bpm=bpm, reference_audio=stem_file)
 
     def _write_midi_from_predict_result(self, result, output_root: Path, stem_file: Path) -> Path | None:
         # Legacy predict often returns tuple(model_output, midi_data, note_events)
@@ -526,14 +599,23 @@ class StudioApp:
                 return target
         return None
 
-    def post_process_midi(self, midi_path: Path, bpm: float | None = None) -> Path:
+    def post_process_midi(
+        self,
+        midi_path: Path,
+        bpm: float | None = None,
+        reference_audio: Path | None = None,
+    ) -> Path:
         try:
             import pretty_midi
 
             pm = pretty_midi.PrettyMIDI(str(midi_path))
+            if reference_audio is not None:
+                pm = self.align_midi_duration_to_audio(pm, reference_audio)
             effective_bpm = bpm if bpm is not None else self.estimate_bpm(pm)
             snapped_bpm = max(40, min(240, round(effective_bpm)))
-            quantized = self.quantize_to_grid(pm, bpm=snapped_bpm, resolution=0.125)
+            # Less aggressive timing snap to preserve groove and sustain.
+            quantized = self.quantize_to_grid(pm, bpm=snapped_bpm, resolution=0.0625)
+            quantized = self.smooth_legato(quantized, max_gap=0.06)
             cleaned_path = midi_path.with_name(midi_path.stem + "_pretty.mid")
             quantized.write(str(cleaned_path))
             if cleaned_path.exists():
@@ -546,6 +628,30 @@ class StudioApp:
         except Exception as exc:
             self._queue("log", f"[WARN] pretty_midi post-process bỏ qua: {exc}")
         return midi_path
+
+    def align_midi_duration_to_audio(self, pm, audio_path: Path):
+        try:
+            import librosa
+
+            audio_duration = float(librosa.get_duration(path=str(audio_path)))
+            midi_duration = float(pm.get_end_time())
+            if audio_duration <= 0 or midi_duration <= 0:
+                return pm
+
+            ratio = audio_duration / midi_duration
+            # Avoid extreme scaling from bad detections.
+            ratio = max(0.7, min(1.4, ratio))
+            if abs(ratio - 1.0) < 0.03:
+                return pm
+
+            for instrument in pm.instruments:
+                for note in instrument.notes:
+                    note.start *= ratio
+                    note.end *= ratio
+            self._queue("log", f"[INFO] MIDI duration aligned to audio (x{ratio:.3f})")
+        except Exception as exc:
+            self._queue("log", f"[WARN] Không align được duration MIDI/audio: {exc}")
+        return pm
 
     def detect_bpm_from_audio(self, audio_path: Path) -> float:
         try:
@@ -638,12 +744,28 @@ class StudioApp:
         step = max(1e-4, sec_per_beat * resolution)
         for instrument in pm.instruments:
             for note in instrument.notes:
+                original_len = max(1e-4, note.end - note.start)
                 q_start = round(note.start / step) * step
-                q_end = round(note.end / step) * step
-                if q_end <= q_start:
-                    q_end = q_start + step
+                # Keep original note length feel; quantize start harder than end.
+                q_end = q_start + original_len
+                # Gentle end snap (half-step) for cleaner bar endings without staccato.
+                q_end = round(q_end / (step / 2.0)) * (step / 2.0)
+                if q_end <= q_start + step * 0.5:
+                    q_end = q_start + step * 0.5
                 note.start = max(0.0, q_start)
                 note.end = max(note.start + 1e-4, q_end)
+        return pm
+
+    def smooth_legato(self, pm, max_gap: float = 0.06):
+        # Extend note tails to reduce machine-gun staccato effect.
+        for instrument in pm.instruments:
+            notes = sorted(instrument.notes, key=lambda n: (n.start, n.pitch))
+            for i in range(len(notes) - 1):
+                cur = notes[i]
+                nxt = notes[i + 1]
+                gap = nxt.start - cur.end
+                if 0 < gap <= max_gap:
+                    cur.end = nxt.start
         return pm
 
     def run_piano_transcription(self, stem_file: Path, output_root: Path) -> Path:
@@ -891,9 +1013,7 @@ class StudioApp:
     def _set_running(self, running: bool) -> None:
         self.worker_running = running
         state = "disabled" if running else "normal"
-        self.separate_btn.config(state=state)
         self.midi_btn.config(state=state)
-        self.all_btn.config(state=state)
         if running:
             self.progress.start(12)
         else:
