@@ -4,7 +4,9 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import Tk, StringVar, filedialog, messagebox
@@ -360,59 +362,116 @@ class StudioApp:
         raise RuntimeError(f"MIDI engine không hợp lệ: {engine}")
 
     def run_basic_pitch(self, stem_file: Path, output_root: Path) -> Path:
-        self._queue("log", "[INFO] Chạy predict_and_save (basic-pitch API mới)...")
+        tuned = dict(
+            onset_threshold=0.5,
+            frame_threshold=0.3,
+            minimum_note_length=58,
+            minimum_frequency=32.7,
+            maximum_frequency=2093.0,
+        )
+        start_ts = time.time()
+
+        # 1) Newer API path: predict_and_save (signature differs by version).
         try:
             from basic_pitch.inference import predict_and_save
 
-            common_kwargs = dict(
-                output_directory=str(output_root),
-                onset_threshold=0.5,
-                frame_threshold=0.3,
-                minimum_note_length=58,
-                minimum_frequency=32.7,
-                maximum_frequency=2093.0,
-            )
-            try:
-                predict_and_save(
-                    [str(stem_file)],
-                    save_midi=True,
-                    sonify_midi=False,
-                    save_model_outputs=False,
-                    save_notes=False,
-                    melodia_trick=True,
-                    **common_kwargs,
-                )
-            except TypeError:
-                # Some versions do not support melodia_trick.
-                predict_and_save(
-                    [str(stem_file)],
-                    save_midi=True,
-                    sonify_midi=False,
-                    save_model_outputs=False,
-                    save_notes=False,
-                    **common_kwargs,
-                )
-        except Exception:
-            self._queue("log", "[WARN] predict_and_save fail, fallback predict API cũ...")
+            sig = inspect.signature(predict_and_save)
+            kwargs = {}
+            if "output_directory" in sig.parameters:
+                kwargs["output_directory"] = str(output_root)
+            elif "output_dir" in sig.parameters:
+                kwargs["output_dir"] = str(output_root)
+            for k, v in tuned.items():
+                if k in sig.parameters:
+                    kwargs[k] = v
+            for k, v in {
+                "save_midi": True,
+                "sonify_midi": False,
+                "save_model_outputs": False,
+                "save_notes": False,
+            }.items():
+                if k in sig.parameters:
+                    kwargs[k] = v
+            if "melodia_trick" in sig.parameters:
+                kwargs["melodia_trick"] = True
+
+            self._queue("log", "[INFO] Chạy predict_and_save (basic-pitch API mới)...")
+            predict_and_save([str(stem_file)], **kwargs)
+        except Exception as exc_new:
+            self._queue("log", f"[WARN] predict_and_save fail, thử predict legacy... ({exc_new})")
+            # 2) Legacy API path: predict (some versions don't accept output_directory).
             try:
                 from basic_pitch.inference import predict
 
-                predict(
-                    str(stem_file),
-                    output_directory=str(output_root),
-                    onset_threshold=0.5,
-                    frame_threshold=0.3,
-                    minimum_note_length=58,
-                    minimum_frequency=32.7,
-                    maximum_frequency=2093.0,
+                sig = inspect.signature(predict)
+                kwargs = {}
+                for k, v in tuned.items():
+                    if k in sig.parameters:
+                        kwargs[k] = v
+                if "output_directory" in sig.parameters:
+                    kwargs["output_directory"] = str(output_root)
+                elif "output_dir" in sig.parameters:
+                    kwargs["output_dir"] = str(output_root)
+
+                result = predict(str(stem_file), **kwargs)
+                wrote = self._write_midi_from_predict_result(result, output_root, stem_file)
+                if wrote is not None:
+                    self._queue("log", f"[INFO] Legacy predict wrote MIDI: {wrote.name}")
+            except Exception as exc_old:
+                self._queue(
+                    "log",
+                    f"[WARN] predict legacy fail, fallback CLI basic_pitch... ({exc_old})",
                 )
-            except Exception as exc:
-                raise RuntimeError(
-                    "basic-pitch lỗi ở cả predict_and_save (API mới) và predict (API cũ). "
-                    f"Lỗi chi tiết: {exc}"
-                ) from exc
-        midi_file = self._latest_midi_or_raise(output_root, "basic_pitch")
+                # 3) CLI fallback for widest compatibility.
+                args = [sys.executable, "-m", "basic_pitch", str(output_root), str(stem_file)]
+                self._stream_process(args, cwd=output_root)
+
+        # Last chance: pick freshest midi after invocation.
+        midi_files = sorted(
+            [*output_root.glob("*.mid"), *output_root.glob("*.midi")],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not midi_files:
+            # Some very old versions may write beside input file.
+            input_side = [
+                p
+                for p in [*stem_file.parent.glob("*.mid"), *stem_file.parent.glob("*.midi")]
+                if p.stat().st_mtime >= start_ts - 2
+            ]
+            input_side.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            if input_side:
+                candidate = input_side[0]
+                moved = output_root / candidate.name
+                if candidate.resolve() != moved.resolve():
+                    shutil.copy2(candidate, moved)
+                midi_files = [moved]
+
+        if not midi_files:
+            raise RuntimeError(
+                "basic-pitch không xuất được MIDI ở mọi đường API/CLI. "
+                "Kiểm tra version basic-pitch và log lỗi phía trên."
+            )
+
+        midi_file = midi_files[0]
+        self._queue("log", f"[INFO] basic_pitch MIDI: {midi_file.name}")
         return self.post_process_midi(midi_file)
+
+    def _write_midi_from_predict_result(self, result, output_root: Path, stem_file: Path) -> Path | None:
+        # Legacy predict often returns tuple(model_output, midi_data, note_events)
+        # where midi_data may expose .write(path).
+        midi_obj = None
+        if isinstance(result, tuple) and len(result) >= 2:
+            midi_obj = result[1]
+        elif isinstance(result, dict):
+            midi_obj = result.get("midi") or result.get("midi_data")
+
+        if midi_obj is not None and hasattr(midi_obj, "write"):
+            target = output_root / f"{stem_file.stem}_basic_pitch.mid"
+            midi_obj.write(str(target))
+            if target.exists():
+                return target
+        return None
 
     def post_process_midi(self, midi_path: Path) -> Path:
         try:
