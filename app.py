@@ -256,8 +256,12 @@ class StudioApp:
                         self._queue("log", f"[OK] Stem fallback file (auto): {stem_file}")
                 stem_file = self.ensure_wav_stem(stem_file, base_out / "stems")
 
+                detected_bpm = self.detect_bpm_from_audio(stem_file)
+                self._queue("log", f"[INFO] BPM sẽ dùng để quantize: {detected_bpm:.1f}")
                 self._queue("status", f"Đang convert MIDI bằng {midi_engine}...")
-                midi_file = self.run_midi_transcription(stem_file, base_out / "midi", midi_engine)
+                midi_file = self.run_midi_transcription(
+                    stem_file, base_out / "midi", midi_engine, bpm=detected_bpm
+                )
                 info = self.inspect_midi(midi_file)
                 self._queue("result", self._render_result(midi_file, info))
                 self._queue("status", f"Hoàn tất! MIDI: {midi_file}")
@@ -317,13 +321,15 @@ class StudioApp:
             raise RuntimeError("Không tạo được stem fallback WAV từ input.")
         return fallback_wav
 
-    def run_midi_transcription(self, stem_file: Path, output_root: Path, engine: str) -> Path:
+    def run_midi_transcription(
+        self, stem_file: Path, output_root: Path, engine: str, bpm: float | None = None
+    ) -> Path:
         output_root.mkdir(parents=True, exist_ok=True)
         stem_file_str = str(stem_file)
         output_root_str = str(output_root)
 
         if engine == "basic_pitch":
-            return self.run_basic_pitch(stem_file, output_root)
+            return self.run_basic_pitch(stem_file, output_root, bpm=bpm)
 
         if engine == "mt3":
             # Package mt3 có nhiều wrapper khác nhau; thử theo thứ tự phổ biến.
@@ -361,11 +367,11 @@ class StudioApp:
 
         raise RuntimeError(f"MIDI engine không hợp lệ: {engine}")
 
-    def run_basic_pitch(self, stem_file: Path, output_root: Path) -> Path:
+    def run_basic_pitch(self, stem_file: Path, output_root: Path, bpm: float | None = None) -> Path:
         tuned = dict(
-            onset_threshold=0.5,
-            frame_threshold=0.3,
-            minimum_note_length=58,
+            onset_threshold=0.6,
+            frame_threshold=0.4,
+            minimum_note_length=80,
             minimum_frequency=32.7,
             maximum_frequency=2093.0,
         )
@@ -455,7 +461,7 @@ class StudioApp:
 
         midi_file = midi_files[0]
         self._queue("log", f"[INFO] basic_pitch MIDI: {midi_file.name}")
-        return self.post_process_midi(midi_file)
+        return self.post_process_midi(midi_file, bpm=bpm)
 
     def _write_midi_from_predict_result(self, result, output_root: Path, stem_file: Path) -> Path | None:
         # Legacy predict often returns tuple(model_output, midi_data, note_events)
@@ -473,13 +479,13 @@ class StudioApp:
                 return target
         return None
 
-    def post_process_midi(self, midi_path: Path) -> Path:
+    def post_process_midi(self, midi_path: Path, bpm: float | None = None) -> Path:
         try:
             import pretty_midi
 
             pm = pretty_midi.PrettyMIDI(str(midi_path))
-            bpm = self.estimate_bpm(pm)
-            snapped_bpm = max(40, min(240, round(bpm)))
+            effective_bpm = bpm if bpm is not None else self.estimate_bpm(pm)
+            snapped_bpm = max(40, min(240, round(effective_bpm)))
             quantized = self.quantize_to_grid(pm, bpm=snapped_bpm, resolution=0.125)
             cleaned_path = midi_path.with_name(midi_path.stem + "_pretty.mid")
             quantized.write(str(cleaned_path))
@@ -493,6 +499,20 @@ class StudioApp:
         except Exception as exc:
             self._queue("log", f"[WARN] pretty_midi post-process bỏ qua: {exc}")
         return midi_path
+
+    def detect_bpm_from_audio(self, audio_path: Path) -> float:
+        try:
+            import librosa
+
+            y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+            bpm = float(tempo[0]) if hasattr(tempo, "__len__") else float(tempo)
+            bpm = max(40.0, min(240.0, bpm))
+            self._queue("log", f"[INFO] librosa BPM detect: {bpm:.1f}")
+            return bpm
+        except Exception as exc:
+            self._queue("log", f"[WARN] librosa BPM fail, dùng 120: {exc}")
+            return 120.0
 
     def estimate_bpm(self, pm) -> float:
         try:
