@@ -9,7 +9,7 @@ import urllib.request
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import Tk, StringVar, filedialog, messagebox
+from tkinter import Tk, StringVar, filedialog, messagebox, simpledialog
 from tkinter import ttk
 
 
@@ -45,6 +45,8 @@ class MidiInfo:
 class StudioApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
+        self.style = ttk.Style(self.root)
+        self._configure_windows_style()
         self.root.title("Studio Tools - Stem to MIDI")
         self.root.geometry("980x700")
         self.root.minsize(900, 620)
@@ -52,6 +54,7 @@ class StudioApp:
         self.audio_path_var = StringVar()
         self.stem_type_var = StringVar(value="vocals")
         self.midi_engine_var = StringVar(value="basic_pitch")
+        self.bpm_var = StringVar(value="")
         self.output_dir_var = StringVar()
         self.status_var = StringVar(value="Sẵn sàng.")
         self.midi_path_var = StringVar(value="")
@@ -60,6 +63,23 @@ class StudioApp:
 
         self._build_ui()
         self.root.after(120, self._drain_queue)
+
+    def _configure_windows_style(self) -> None:
+        # Prefer native Windows ttk appearance.
+        try:
+            if "vista" in self.style.theme_names():
+                self.style.theme_use("vista")
+            elif "winnative" in self.style.theme_names():
+                self.style.theme_use("winnative")
+        except Exception:
+            pass
+
+        self.root.option_add("*Font", "Segoe UI 10")
+        self.style.configure("TLabel", font=("Segoe UI", 10))
+        self.style.configure("TButton", font=("Segoe UI", 10), padding=6)
+        self.style.configure("TEntry", font=("Segoe UI", 10))
+        self.style.configure("TCombobox", font=("Segoe UI", 10))
+        self.style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
 
     def _build_ui(self) -> None:
         main = ttk.Frame(self.root, padding=14)
@@ -113,6 +133,11 @@ class StudioApp:
             width=34,
         )
         engine_combo.grid(row=3, column=1, sticky="w")
+
+        ttk.Label(input_group, text="BPM (để trống = tự detect):").grid(
+            row=2, column=2, sticky="w", pady=(10, 0)
+        )
+        ttk.Entry(input_group, textvariable=self.bpm_var, width=10).grid(row=3, column=2, sticky="w")
 
         ttk.Label(input_group, text="Output folder (optional):").grid(
             row=4, column=0, sticky="w", pady=(10, 0)
@@ -258,7 +283,17 @@ class StudioApp:
                 # Bước mới: harmonic separation trước khi MIDI
                 stem_file = self.extract_melody_only(stem_file, base_out / "stems")
 
-                detected_bpm = self.detect_bpm_from_audio(stem_file)
+                manual_bpm = self.bpm_var.get().strip()
+                if manual_bpm:
+                    try:
+                        detected_bpm = max(40.0, min(240.0, float(manual_bpm)))
+                        self._queue("log", f"[INFO] BPM thủ công: {detected_bpm:.1f}")
+                    except ValueError:
+                        detected_bpm = self.detect_bpm_from_audio(stem_file)
+                        detected_bpm = self._confirm_bpm_on_main_thread(detected_bpm)
+                else:
+                    detected_bpm = self.detect_bpm_from_audio(stem_file)
+                    detected_bpm = self._confirm_bpm_on_main_thread(detected_bpm)
                 self._queue("log", f"[INFO] BPM sẽ dùng để quantize: {detected_bpm:.1f}")
                 self._queue("status", f"Đang convert MIDI bằng {midi_engine}...")
                 midi_file = self.run_midi_transcription(
@@ -266,6 +301,14 @@ class StudioApp:
                 )
                 # Bước mới: ghi BPM chuẩn vào header
                 midi_file = self.write_bpm_to_midi(midi_file, detected_bpm)
+                # Dọn file WAV trung gian, chỉ giữ MIDI
+                try:
+                    stems_dir = base_out / "stems"
+                    for f in stems_dir.glob("*.wav"):
+                        f.unlink()
+                    self._queue("log", "[INFO] Đã xóa file WAV trung gian.")
+                except Exception:
+                    pass
                 info = self.inspect_midi(midi_file)
                 self._queue("result", self._render_result(midi_file, info))
                 self._queue("status", f"Hoàn tất! MIDI: {midi_file}")
@@ -509,14 +552,44 @@ class StudioApp:
             import librosa
 
             y, sr = librosa.load(str(audio_path), sr=None, mono=True)
-            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-            bpm = float(tempo[0]) if hasattr(tempo, "__len__") else float(tempo)
-            bpm = max(40.0, min(240.0, bpm))
-            self._queue("log", f"[INFO] librosa BPM detect: {bpm:.1f}")
-            return bpm
+            candidates: list[float] = []
+            for hint in (60.0, 120.0, 180.0):
+                tempo, _ = librosa.beat.beat_track(y=y, sr=sr, start_bpm=hint)
+                bpm = float(tempo[0]) if hasattr(tempo, "__len__") else float(tempo)
+                candidates.append(bpm)
+
+            candidates.sort()
+            detected = max(40.0, min(240.0, candidates[1]))  # median of 3
+            cands = [f"{b:.1f}" for b in candidates]
+            self._queue("log", f"[INFO] librosa BPM candidates: {cands} -> chọn {detected:.1f}")
+            return detected
         except Exception as exc:
             self._queue("log", f"[WARN] librosa BPM fail, dùng 120: {exc}")
             return 120.0
+
+    def confirm_bpm(self, detected: float) -> float:
+        result = simpledialog.askfloat(
+            "Xác nhận BPM",
+            f"librosa detect: {detected:.1f} BPM\n\nNhập BPM đúng (hoặc OK để dùng):",
+            initialvalue=round(detected, 1),
+            minvalue=40,
+            maxvalue=240,
+        )
+        return result if result else detected
+
+    def _confirm_bpm_on_main_thread(self, detected: float) -> float:
+        done = threading.Event()
+        chosen = {"bpm": detected}
+
+        def _ask() -> None:
+            try:
+                chosen["bpm"] = self.confirm_bpm(detected)
+            finally:
+                done.set()
+
+        self.root.after(0, _ask)
+        done.wait()
+        return chosen["bpm"]
 
     def extract_melody_only(self, wav_path: Path, output_root: Path) -> Path:
         try:
